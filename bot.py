@@ -1,4 +1,6 @@
 import discord
+from discord import app_commands
+from discord.ui import Button, View
 import requests
 import csv
 import io
@@ -10,142 +12,210 @@ import re
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 
-CSV_URL = "https://docs.google.com/spreadsheets/d/18LXeD2pB0YpsfsPWPhe0PXgNKVL4L35gXykD3eNcqV8/export?format=csv"
 
-# ID канала для уведомлений с тегами (ваши уведомления)
-NOTIFICATION_CHANNEL_ID = 1480301687402008696
-# ID канала для лога модерации (ВСЕ ИЗМЕНЕНИЯ)
-MODERATION_LOG_CHANNEL_ID = 1474337639137153077
+CSV_URL = "https://docs.google.com/spreadsheets/d/1XfG6cFcRLoxPxSRjUHflKxYAmnCx-OU6NlVSFUMQ7iw/export?format=csv"
 
-# ID канала для напоминаний
-REMINDER_CHANNEL_ID = 1480618232611344476
+NOTIFY_USERS = [1364992552616329349]
 
-# Кто будет получать уведомления (ваш тег)
-NOTIFY_USERS = [
-    1364992552616329349,  # Ваш Discord ID
-]
-
-NOTIFY_ROLE_ID = None
 PREVIOUS_STATE_FILE = "previous_state.json"
-REMINDERS_FILE = "reminders.json"
+HISTORY_FILE = "player_history.json"
+STATS_FILE = "stats.json"
+BLACKLIST_FILE = "blacklist.json"
+SCHEDULES_FILE = "schedules.json"
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = discord.Client(intents=intents)
+tree = app_commands.CommandTree(bot)
 
-notification_channel = None
 moderation_channel = None
-reminder_channel = None
+notification_channel = None
+logs_channel = None
 first_run = True
 
-COLUMN_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+CHANNELS_CONFIG_FILE = "channels_config.json"
 
-# Загружаем напоминания при старте
-reminders = []
-
-def load_reminders():
-    """Загружает напоминания из файла"""
-    global reminders
-    if not os.path.exists(REMINDERS_FILE):
-        reminders = []
-        return
+def load_channels_config():
+    if not os.path.exists(CHANNELS_CONFIG_FILE):
+        return {"moderation": None, "notification": None, "logs": None}
     try:
-        with open(REMINDERS_FILE, 'r', encoding='utf-8') as f:
-            reminders = json.load(f)
-        print(f"📅 Загружено {len(reminders)} напоминаний")
+        with open(CHANNELS_CONFIG_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
     except:
-        reminders = []
+        return {"moderation": None, "notification": None, "logs": None}
 
-def save_reminders():
-    """Сохраняет напоминания в файл"""
+def save_channels_config():
+    global moderation_channel, notification_channel, logs_channel
+    config = {
+        "moderation": moderation_channel.id if moderation_channel else None,
+        "notification": notification_channel.id if notification_channel else None,
+        "logs": logs_channel.id if logs_channel else None
+    }
     try:
-        with open(REMINDERS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(reminders, f, ensure_ascii=False, indent=2)
+        with open(CHANNELS_CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"❌ Ошибка сохранения напоминаний: {e}")
+        print(f"Ошибка сохранения: {e}")
+
+def load_config_channels():
+    global moderation_channel, notification_channel, logs_channel
+    config = load_channels_config()
+    
+    if config.get("moderation"):
+        moderation_channel = bot.get_channel(config["moderation"])
+    if config.get("notification"):
+        notification_channel = bot.get_channel(config["notification"])
+    if config.get("logs"):
+        logs_channel = bot.get_channel(config["logs"])
+
+def load_blacklist():
+    if not os.path.exists(BLACKLIST_FILE):
+        return []
+    try:
+        with open(BLACKLIST_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_blacklist(blacklist):
+    try:
+        with open(BLACKLIST_FILE, 'w', encoding='utf-8') as f:
+            json.dump(blacklist, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def is_blacklisted(user_id):
+    return user_id in load_blacklist()
+
+def load_player_history():
+    if not os.path.exists(HISTORY_FILE):
+        return {}
+    try:
+        with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {}
+
+def save_player_history(history):
+    try:
+        with open(HISTORY_FILE, 'w', encoding='utf-8') as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def add_to_history(nick, action, details):
+    history = load_player_history()
+    if nick not in history:
+        history[nick] = []
+    history[nick].append({
+        "action": action,
+        "details": details,
+        "timestamp": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
+    })
+    if len(history[nick]) > 50:
+        history[nick] = history[nick][-50:]
+    save_player_history(history)
+
+def load_stats():
+    if not os.path.exists(STATS_FILE):
+        return {"daily": {}, "weekly": {}, "monthly": {}, "total_added": 0, "total_removed": 0, "total_exited": 0}
+    try:
+        with open(STATS_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return {"daily": {}, "weekly": {}, "monthly": {}, "total_added": 0, "total_removed": 0, "total_exited": 0}
+
+def save_stats(stats):
+    try:
+        with open(STATS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(stats, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+def update_stats(action):
+    stats = load_stats()
+    today = date.today().strftime("%d.%m.%Y")
+    week = date.today().strftime("%Y-%W")
+    month = date.today().strftime("%Y-%m")
+    
+    if action == "added":
+        stats["total_added"] += 1
+        if today not in stats["daily"]:
+            stats["daily"][today] = {"added": 0, "removed": 0, "exited": 0}
+        stats["daily"][today]["added"] += 1
+        if week not in stats["weekly"]:
+            stats["weekly"][week] = {"added": 0, "removed": 0, "exited": 0}
+        stats["weekly"][week]["added"] += 1
+        if month not in stats["monthly"]:
+            stats["monthly"][month] = {"added": 0, "removed": 0, "exited": 0}
+        stats["monthly"][month]["added"] += 1
+    elif action == "removed":
+        stats["total_removed"] += 1
+        if today not in stats["daily"]:
+            stats["daily"][today] = {"added": 0, "removed": 0, "exited": 0}
+        stats["daily"][today]["removed"] += 1
+        if week not in stats["weekly"]:
+            stats["weekly"][week] = {"added": 0, "removed": 0, "exited": 0}
+        stats["weekly"][week]["removed"] += 1
+        if month not in stats["monthly"]:
+            stats["monthly"][month] = {"added": 0, "removed": 0, "exited": 0}
+        stats["monthly"][month]["removed"] += 1
+    elif action == "exited":
+        stats["total_exited"] += 1
+        if today not in stats["daily"]:
+            stats["daily"][today] = {"added": 0, "removed": 0, "exited": 0}
+        stats["daily"][today]["exited"] += 1
+        if week not in stats["weekly"]:
+            stats["weekly"][week] = {"added": 0, "removed": 0, "exited": 0}
+        stats["weekly"][week]["exited"] += 1
+        if month not in stats["monthly"]:
+            stats["monthly"][month] = {"added": 0, "removed": 0, "exited": 0}
+        stats["monthly"][month]["exited"] += 1
+    
+    save_stats(stats)
+
+def load_schedules():
+    if not os.path.exists(SCHEDULES_FILE):
+        return []
+    try:
+        with open(SCHEDULES_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except:
+        return []
+
+def save_schedules(schedules):
+    try:
+        with open(SCHEDULES_FILE, 'w', encoding='utf-8') as f:
+            json.dump(schedules, f, ensure_ascii=False, indent=2)
+    except:
+        pass
+
+async def log_action(user, action, details):
+    if logs_channel:
+        embed = discord.Embed(
+            title="📝 ЛОГ ДЕЙСТВИЯ",
+            description=f"**{user.name}** выполнил команду",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="🔧 Действие", value=f"```{action}```", inline=True)
+        embed.add_field(name="📄 Детали", value=f"```{details[:100]}```", inline=True)
+        await logs_channel.send(embed=embed)
 
 @bot.event
 async def on_ready():
-    global notification_channel, moderation_channel, reminder_channel, first_run
     print(f"✅ Бот {bot.user} запущен!")
-    
-    notification_channel = bot.get_channel(NOTIFICATION_CHANNEL_ID)
-    moderation_channel = bot.get_channel(MODERATION_LOG_CHANNEL_ID)
-    reminder_channel = bot.get_channel(REMINDER_CHANNEL_ID)
-    
-    if notification_channel:
-        print(f"📢 Канал уведомлений: #{notification_channel.name}")
-    else:
-        print(f"❌ Канал уведомлений с ID {NOTIFICATION_CHANNEL_ID} не найден!")
-    
-    if moderation_channel:
-        print(f"📝 Канал модерации: #{moderation_channel.name}")
-    else:
-        print(f"❌ Канал модерации с ID {MODERATION_LOG_CHANNEL_ID} не найден!")
-    
-    if reminder_channel:
-        print(f"⏰ Канал напоминаний: #{reminder_channel.name}")
-    else:
-        print(f"❌ Канал напоминаний с ID {REMINDER_CHANNEL_ID} не найден!")
-    
-    load_reminders()
+    await tree.sync()
+    print("✅ Слэш-команды синхронизированы!")
+    load_config_channels()
     
     bot.loop.create_task(check_changes_periodically())
-    bot.loop.create_task(check_reminders_periodically())
-
-async def check_reminders_periodically():
-    """Проверяет напоминания каждую минуту"""
-    await bot.wait_until_ready()
-    
-    while not bot.is_closed():
-        try:
-            await check_reminders()
-            await asyncio.sleep(60)
-        except Exception as e:
-            print(f"Ошибка в check_reminders_periodically: {e}")
-            await asyncio.sleep(60)
-
-async def check_reminders():
-    """Проверяет и отправляет просроченные напоминания"""
-    global reminders
-    
-    if not reminders or not reminder_channel:
-        return
-    
-    now = datetime.now()
-    to_remove = []
-    
-    for i, reminder in enumerate(reminders):
-        try:
-            reminder_date = datetime.strptime(reminder['datetime'], "%d.%m.%Y %H:%M")
-            
-            if reminder_date <= now:
-                mentions = " ".join([f"<@{user_id}>" for user_id in reminder.get('users', NOTIFY_USERS)])
-                
-                message = f"{mentions}\n```\n⏰ НАПОМИНАНИЕ\n"
-                message += f"📅 {reminder['datetime']}\n"
-                message += f"📝 {reminder['text']}\n"
-                if 'author' in reminder:
-                    message += f"👤 от {reminder['author']}\n"
-                message += f"```"
-                
-                await reminder_channel.send(message)
-                print(f"✅ Отправлено напоминание: {reminder['text']}")
-                
-                to_remove.append(i)
-                
-        except Exception as e:
-            print(f"❌ Ошибка проверки напоминания: {e}")
-    
-    if to_remove:
-        for i in sorted(to_remove, reverse=True):
-            reminders.pop(i)
-        save_reminders()
+    bot.loop.create_task(check_daily_notifications())
+    bot.loop.create_task(check_tomorrow_exits())
+    bot.loop.create_task(check_scheduled_reports())
 
 async def check_changes_periodically():
-    """Проверяет изменения каждые 30 секунд"""
     await bot.wait_until_ready()
-    
     while not bot.is_closed():
         try:
             await check_all_changes()
@@ -154,19 +224,159 @@ async def check_changes_periodically():
             print(f"Ошибка: {e}")
             await asyncio.sleep(30)
 
-async def get_current_blacklist_with_details():
-    """Получает текущие данные из таблицы"""
+async def check_daily_notifications():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            now = datetime.now()
+            if now.hour == 0 and now.minute == 0:
+                await check_today_exits()
+                await asyncio.sleep(60)
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"Ошибка в daily check: {e}")
+            await asyncio.sleep(60)
+
+async def check_tomorrow_exits():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            now = datetime.now()
+            if now.hour == 20 and now.minute == 0:
+                await send_tomorrow_notification()
+                await asyncio.sleep(60)
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"Ошибка в tomorrow check: {e}")
+            await asyncio.sleep(60)
+
+async def check_scheduled_reports():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        try:
+            now = datetime.now()
+            schedules = load_schedules()
+            current_time = now.strftime("%H:%M")
+            for schedule in schedules:
+                if schedule["time"] == current_time:
+                    channel = bot.get_channel(schedule["channel_id"])
+                    if channel:
+                        await send_daily_report(channel)
+            await asyncio.sleep(60)
+        except Exception as e:
+            print(f"Ошибка в scheduled reports: {e}")
+            await asyncio.sleep(60)
+
+async def send_tomorrow_notification():
+    if not notification_channel:
+        return
     try:
         response = requests.get(CSV_URL, timeout=10)
         response.encoding = 'utf-8'
+        response.raise_for_status()
         
+        csv_content = response.text
+        reader = csv.DictReader(io.StringIO(csv_content))
+        all_rows = list(reader)
+        
+        tomorrow = date.today() + timedelta(days=1)
+        tomorrow_str = tomorrow.strftime("%d.%m.%Y")
+        exiting_tomorrow = []
+        
+        for i, row in enumerate(all_rows, start=2):
+            игровой_ник = row.get("Игровой ник", "").strip()
+            if not игровой_ник:
+                continue
+            актуальность = row.get("Актуальность", "").strip()
+            дата_снятия_str = row.get("Дата снятия", "").strip()
+            if tomorrow_str not in дата_снятия_str:
+                continue
+            if актуальность.lower() == "в чс":
+                exiting_tomorrow.append({
+                    "ник": игровой_ник,
+                    "строка": i,
+                    "discord": row.get("Дискорд юз", "-"),
+                    "причина": row.get("Причина", "-")[:50]
+                })
+        
+        if exiting_tomorrow:
+            embed = discord.Embed(
+                title="⏰ УВЕДОМЛЕНИЕ ЗА 24 ЧАСА",
+                description=f"**{len(exiting_tomorrow)}** игрок(ов) должны выйти из ЧС ЗАВТРА",
+                color=0xff9900,
+                timestamp=datetime.now()
+            )
+            for player in exiting_tomorrow[:10]:
+                embed.add_field(
+                    name=f"⚠️ {player['ник']}",
+                    value=f"┌ **Строка:** #{player['строка']}\n├ **Discord:** {player['discord']}\n└ **Причина:** {player['причина']}",
+                    inline=False
+                )
+            mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFY_USERS])
+            await notification_channel.send(content=mentions, embed=embed)
+    except Exception as e:
+        print(f"Ошибка tomorrow notification: {e}")
+
+async def check_today_exits():
+    if not notification_channel:
+        return
+    try:
+        response = requests.get(CSV_URL, timeout=10)
+        response.encoding = 'utf-8'
+        response.raise_for_status()
+        
+        csv_content = response.text
+        reader = csv.DictReader(io.StringIO(csv_content))
+        all_rows = list(reader)
+        
+        today = date.today()
+        today_str = today.strftime("%d.%m.%Y")
+        exited_today = []
+        
+        for i, row in enumerate(all_rows, start=2):
+            игровой_ник = row.get("Игровой ник", "").strip()
+            if not игровой_ник:
+                continue
+            актуальность = row.get("Актуальность", "").strip()
+            дата_снятия_str = row.get("Дата снятия", "").strip()
+            if today_str not in дата_снятия_str:
+                continue
+            if "вынесен из чс" in актуальность.lower() or "амнистия" in актуальность.lower():
+                exited_today.append({
+                    "ник": игровой_ник,
+                    "строка": i,
+                    "discord": row.get("Дискорд юз", "-"),
+                    "причина": row.get("Причина", "-")[:50]
+                })
+        
+        if exited_today:
+            embed = discord.Embed(
+                title="🎉 ВЫХОД ИЗ ЧЕРНОГО СПИСКА",
+                description=f"**{len(exited_today)}** игрок(ов) вышли из ЧС сегодня",
+                color=0x00ff00,
+                timestamp=datetime.now()
+            )
+            for player in exited_today[:10]:
+                embed.add_field(
+                    name=f"👤 {player['ник']}",
+                    value=f"┌ **Строка:** #{player['строка']}\n├ **Discord:** {player['discord']}\n└ **Причина:** {player['причина']}",
+                    inline=False
+                )
+            mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFY_USERS])
+            await notification_channel.send(content=mentions, embed=embed)
+    except Exception as e:
+        print(f"Ошибка daily check: {e}")
+
+async def get_current_blacklist_with_details():
+    try:
+        response = requests.get(CSV_URL, timeout=10)
+        response.encoding = 'utf-8'
         if response.status_code != 200:
             return []
         
         csv_content = response.text
         reader = csv.DictReader(io.StringIO(csv_content))
         current_rows = list(reader)
-        
         current_players = []
         
         for i, row in enumerate(current_rows, start=2):
@@ -176,7 +386,6 @@ async def get_current_blacklist_with_details():
             
             актуальность = row.get("Актуальность", "").lower()
             дата_снятия = row.get("Дата снятия", "").strip()
-            
             is_in_blacklist = True
             
             if "навсегда" in актуальность:
@@ -195,29 +404,20 @@ async def get_current_blacklist_with_details():
                 "строка": i,
                 "is_in_blacklist": is_in_blacklist
             }
-            
             current_players.append(player_data)
-        
         return current_players
-        
     except Exception as e:
         print(f"Ошибка загрузки: {e}")
         return []
 
 async def check_all_changes():
-    """Проверяет изменения и отправляет в канал"""
-    global first_run
-    
     try:
         current_players = await get_current_blacklist_with_details()
-        
         if not current_players:
             return
         
         previous_state = load_previous_state()
-        
         if not previous_state:
-            print("📝 Первый запуск - сохраняю состояние без уведомлений")
             save_current_state(current_players)
             return
         
@@ -232,13 +432,16 @@ async def check_all_changes():
         for nick, curr in curr_by_nick.items():
             if nick not in prev_by_nick:
                 added.append(curr)
-                print(f"➕ ДОБАВЛЕН: {curr['ник']}")
+                update_stats("added")
+                add_to_history(nick, "added", f"Добавлен в ЧС. Причина: {curr['причина'][:100]}")
             else:
                 prev = prev_by_nick[nick]
-                
                 if prev["is_in_blacklist"] and not curr["is_in_blacklist"]:
+                    if notification_channel:
+                        await send_instant_notification(curr)
                     exited.append(curr)
-                    print(f"👤 ВЫШЕЛ: {curr['ник']}")
+                    update_stats("exited")
+                    add_to_history(nick, "exited", f"Вышел из ЧС. Дата снятия: {curr['дата_снятия']}")
                 
                 changes = []
                 for field in ["причина", "дата_снятия", "кто_выдал", "актуальность", "организация", "дискорд"]:
@@ -248,36 +451,48 @@ async def check_all_changes():
                             "было": prev.get(field, "-"),
                             "стало": curr.get(field, "-")
                         })
-                
                 if changes:
                     changed.append({
                         "ник": curr['ник'],
                         "строка": curr['строка'],
                         "изменения": changes
                     })
-                    print(f"✏️ ИЗМЕНЕНО: {curr['ник']}")
+                    add_to_history(nick, "changed", f"Изменены данные")
         
         for nick, prev in prev_by_nick.items():
             if nick not in curr_by_nick:
                 removed.append(prev)
-                print(f"➖ УДАЛЕН: {prev['ник']}")
+                update_stats("removed")
+                add_to_history(nick, "removed", "Удален из таблицы")
         
         save_current_state(current_players)
         
-        if added or removed or changed or exited:
-            print(f"📢 ОБНАРУЖЕНЫ ИЗМЕНЕНИЯ! Отправляю в канал...")
-            
-            if moderation_channel:
-                await send_all_changes_one_message(added, removed, changed, exited)
-            
-            if exited and notification_channel:
-                await send_to_notification_channel(exited)
-        
+        if moderation_channel and (added or removed or changed or exited):
+            await send_all_changes_one_message(added, removed, changed, exited)
     except Exception as e:
         print(f"Ошибка: {e}")
 
+async def send_instant_notification(player):
+    if not notification_channel:
+        return
+    try:
+        embed = discord.Embed(
+            title="⚠️ СРОЧНОЕ УВЕДОМЛЕНИЕ",
+            description=f"**{player['ник']}** вышел из черного списка!",
+            color=0xff0000,
+            timestamp=datetime.now()
+        )
+        embed.add_field(name="👤 Игрок", value=f"```{player['ник']}```", inline=True)
+        embed.add_field(name="📍 Строка", value=f"```#{player['строка']}```", inline=True)
+        embed.add_field(name="💬 Discord", value=f"```{player['дискорд'][:50]}```", inline=True)
+        embed.add_field(name="📅 Дата снятия", value=f"```{player['дата_снятия']}```", inline=True)
+        embed.add_field(name="📝 Причина", value=f"```{player['причина'][:100]}```", inline=False)
+        mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFY_USERS])
+        await notification_channel.send(content=mentions, embed=embed)
+    except Exception as e:
+        print(f"Ошибка отправки уведомления: {e}")
+
 def load_previous_state():
-    """Загружает предыдущее состояние из файла"""
     if not os.path.exists(PREVIOUS_STATE_FILE):
         return []
     try:
@@ -287,7 +502,6 @@ def load_previous_state():
         return []
 
 def save_current_state(players):
-    """Сохраняет текущее состояние в файл"""
     try:
         with open(PREVIOUS_STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(players, f, ensure_ascii=False, indent=2)
@@ -295,723 +509,609 @@ def save_current_state(players):
         print(f"Ошибка сохранения: {e}")
 
 async def send_all_changes_one_message(added, removed, changed, exited):
-    """Отправляет ВСЕ изменения ОДНИМ сообщением в канал модерации"""
     if not moderation_channel:
         return
-    
     try:
-        message = "```\n"
-        message += f"📊 ИЗМЕНЕНИЯ В ТАБЛИЦЕ\n"
-        message += f"🕐 {datetime.now().strftime('%H:%M:%S')}\n"
+        embed = discord.Embed(
+            title="📊 ИЗМЕНЕНИЯ В ТАБЛИЦЕ",
+            color=0x3498db,
+            timestamp=datetime.now()
+        )
+        stats_text = ""
+        if added: stats_text += f"✅ **+{len(added)}** добавлено\n"
+        if removed: stats_text += f"❌ **-{len(removed)}** удалено\n"
+        if changed: stats_text += f"✏️ **{len(changed)}** изменено\n"
+        if exited: stats_text += f"👤 **{len(exited)}** вышло из ЧС\n"
+        embed.add_field(name="📈 Статистика", value=stats_text if stats_text else "Нет изменений", inline=False)
         
-        stats_parts = []
-        if added: stats_parts.append(f"✅ +{len(added)}")
-        if removed: stats_parts.append(f"❌ -{len(removed)}")
-        if changed: stats_parts.append(f"✏️ {len(changed)}")
-        if exited: stats_parts.append(f"👤 {len(exited)}")
-        
-        if stats_parts:
-            message += f"{' | '.join(stats_parts)}\n"
-        
-        message += f"\n"
-        
-        for player in changed:
-            message += f"✏️ ИЗМЕНЕН: {player['ник']} (стр.{player['строка']})\n"
+        for player in changed[:5]:
+            changes_text = ""
             for change in player['изменения']:
-                message += f"{change['поле']}: {change['было']} → {change['стало']}\n"
-            message += f"\n"
-        
-        for player in added:
-            message += f"✅ ДОБАВЛЕН: {player['ник']} (стр.{player['строка']})\n"
-            message += f"  Discord: {player['дискорд']}\n"
-            message += f"  Причина: {player['причина'][:100]}\n"
-            message += f"  Дата снятия: {player['дата_снятия']}\n"
-            message += f"  Выдал: {player['кто_выдал']}\n"
-            message += f"  Актуальность: {player['актуальность']}\n\n"
-        
-        for player in removed:
-            message += f"❌ УДАЛЕН: {player['ник']} (стр.{player['строка']})\n\n"
-        
-        for player in exited:
-            message += f"👤 ВЫШЕЛ ИЗ ЧС: {player['ник']} (стр.{player['строка']})\n"
-            message += f"  Discord: {player['дискорд']}\n"
-            message += f"  Дата снятия: {player['дата_снятия']}\n\n"
-        
-        message += "```"
-        
-        if len(message) <= 2000:
-            await moderation_channel.send(message)
-        else:
-            header = f"```\n📊 ИЗМЕНЕНИЯ В ТАБЛИЦЕ\n🕐 {datetime.now().strftime('%H:%M:%S')}\n"
-            if stats_parts:
-                header += f"{' | '.join(stats_parts)}\n"
-            header += "```"
-            await moderation_channel.send(header)
-            
-            changes_message = "```\n"
-            for player in changed:
-                part = f"✏️ ИЗМЕНЕН: {player['ник']} (стр.{player['строка']})\n"
-                for change in player['изменения']:
-                    part += f"{change['поле']}: {change['было']} → {change['стало']}\n"
-                part += f"\n"
-                
-                if len(changes_message + part) > 1900:
-                    changes_message += "```"
-                    await moderation_channel.send(changes_message)
-                    await asyncio.sleep(1)
-                    changes_message = "```\n" + part
-                else:
-                    changes_message += part
-            
-            if changes_message != "```\n":
-                changes_message += "```"
-                await moderation_channel.send(changes_message)
-        
-    except Exception as e:
-        print(f"❌ Ошибка отправки: {e}")
-
-async def send_to_notification_channel(exited_players):
-    """Отправляет в канал с тегами"""
-    if not notification_channel:
-        return
-    
-    try:
-        mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFY_USERS])
-        
-        message = f"{mentions}\n```\n"
-        message += f"👤 ВЫХОД ИЗ ЧС\n"
-        message += f"Количество: {len(exited_players)}\n\n"
-        
-        for player in exited_players:
-            message += f"• {player['ник']} (стр.{player['строка']})\n"
-            message += f"  Discord: {player['дискорд']}\n"
-            message += f"  Дата: {player['дата_снятия']}\n"
-            message += f"  Причина: {player['причина'][:50]}\n\n"
-        
-        message += f"```"
-        
-        await notification_channel.send(message)
-        
-    except Exception as e:
-        print(f"Ошибка: {e}")
-
-# =============== ВСЕ КОМАНДЫ ===============
-
-@bot.event
-async def on_message(message):
-    if message.author == bot.user:
-        return
-    
-    # Тестовая команда для проверки канала напоминаний
-    if message.content == "!test_remind":
-        if reminder_channel:
-            test_msg = "```\n🧪 ТЕСТ КАНАЛА НАПОМИНАНИЙ\nКанал работает!\n```"
-            await reminder_channel.send(test_msg)
-            await message.channel.send(f"✅ Тест отправлен в канал напоминаний!")
-        else:
-            await message.channel.send("❌ Канал напоминаний не найден!")
-        return
-    
-    # Тестовая команда для проверки канала модерации
-    if message.content == "!test_mod":
-        if moderation_channel:
-            test_msg = "```\n📊 ИЗМЕНЕНИЯ В ТАБЛИЦЕ\n🕐 18:15:22\n✏️ ИЗМЕНЕН: тест (стр.696)\nактуальность: В ЧС → Вынесен из ЧС\n```"
-            await moderation_channel.send(test_msg)
-            await message.channel.send("✅ Тест отправлен в канал модерации!")
-        else:
-            await message.channel.send("❌ Канал модерации не найден!")
-        return
-    
-    # ⏰ КОМАНДА ДЛЯ НАПОМИНАНИЙ
-    if message.content.startswith("!remind"):
-        try:
-            text = message.content[7:].strip()
-            
-            date_match = re.search(r'(\d{2}\.\d{2}\.\d{4})', text)
-            time_match = re.search(r'(\d{2}:\d{2})', text)
-            quote_match = re.search(r'"([^"]*)"', text)
-            
-            if not date_match:
-                await message.channel.send("❌ Неправильный формат! Используйте: !remind ДД.ММ.ГГГГ ЧЧ:ММ \"текст\"")
-                return
-            
-            date_str = date_match.group(1)
-            
-            if time_match:
-                time_str = time_match.group(1)
-                datetime_str = f"{date_str} {time_str}"
-            else:
-                datetime_str = f"{date_str} 00:00"
-            
-            if quote_match:
-                reminder_text = quote_match.group(1)
-            else:
-                parts = text.split()
-                if time_match:
-                    reminder_text = ' '.join(parts[2:])
-                else:
-                    reminder_text = ' '.join(parts[1:])
-            
-            if not reminder_text:
-                reminder_text = "Напоминание"
-            
-            try:
-                reminder_datetime = datetime.strptime(datetime_str, "%d.%m.%Y %H:%M")
-                if reminder_datetime < datetime.now():
-                    await message.channel.send("❌ Нельзя установить напоминание на прошлое!")
-                    return
-            except ValueError:
-                await message.channel.send("❌ Неправильный формат даты или времени!")
-                return
-            
-            reminder = {
-                "datetime": datetime_str,
-                "text": reminder_text,
-                "author": str(message.author),
-                "author_id": message.author.id,
-                "users": NOTIFY_USERS,
-                "created": datetime.now().strftime("%d.%m.%Y %H:%M:%S")
-            }
-            
-            reminders.append(reminder)
-            save_reminders()
-            
-            response = f"```\n✅ НАПОМИНАНИЕ УСТАНОВЛЕНО\n"
-            response += f"📅 {datetime_str}\n"
-            response += f"📝 {reminder_text}\n"
-            response += f"```"
-            
-            await message.channel.send(response)
-            print(f"✅ Установлено напоминание: {datetime_str} - {reminder_text}")
-            
-        except Exception as e:
-            await message.channel.send(f"❌ Ошибка: {e}")
-            print(f"Ошибка в !remind: {e}")
-        
-        return
-    
-    # Команда для просмотра напоминаний
-    if message.content == "!reminders":
-        if not reminders:
-            await message.channel.send("📭 Нет активных напоминаний")
-            return
-        
-        response = "```\n📅 АКТИВНЫЕ НАПОМИНАНИЯ\n\n"
-        for i, r in enumerate(reminders, 1):
-            response += f"{i}. {r['datetime']}\n"
-            response += f"   {r['text']}\n"
-            response += f"   от {r['author']}\n\n"
-        response += f"Всего: {len(reminders)}\n```"
-        
-        if len(response) <= 2000:
-            await message.channel.send(response)
-        else:
-            parts = [response[i:i+1990] for i in range(0, len(response), 1990)]
-            for part in parts:
-                await message.channel.send(part)
-        
-        return
-    
-    # Команда для удаления напоминания
-    if message.content.startswith("!remind_remove"):
-        try:
-            num = int(message.content[14:].strip())
-            if 1 <= num <= len(reminders):
-                removed = reminders.pop(num - 1)
-                save_reminders()
-                await message.channel.send(f"✅ Напоминание удалено: {removed['datetime']} - {removed['text']}")
-            else:
-                await message.channel.send(f"❌ Напоминание с номером {num} не найдено")
-        except:
-            await message.channel.send("❌ Используйте: !remind_remove НОМЕР")
-        
-        return
-    
-    # Команда для очистки всех напоминаний
-    if message.content == "!remind_clear" and message.author.id in NOTIFY_USERS:
-        reminders.clear()
-        save_reminders()
-        await message.channel.send("✅ Все напоминания удалены")
-        return
-    
-    # =============== ИСПРАВЛЕННАЯ КОМАНДА !next ===============
-    if message.content.startswith("!next"):
-        await message.channel.send("📅 Проверяю записи, которые должны выйти из черного списка сегодня...")
-        
-        try:
-            response = requests.get(CSV_URL, timeout=10)
-            response.encoding = 'utf-8'
-            response.raise_for_status()
-            
-            csv_content = response.text
-            reader = csv.DictReader(io.StringIO(csv_content))
-            all_rows = list(reader)
-            
-            if not all_rows:
-                await message.channel.send("❌ Таблица пуста")
-                return
-            
-            today = date.today()
-            today_str = today.strftime("%d.%m.%Y")
-            
-            exiting_today = []
-            
-            for i, row in enumerate(all_rows, start=2):
-                игровой_ник = row.get("Игровой ник", "").strip()
-                if not игровой_ник:
-                    continue
-                
-                # Получаем значение из колонки K (Актуальность)
-                актуальность = row.get("Актуальность", "").strip()
-                
-                # Проверяем, что в колонке K ТОЧНО "В ЧС" (без учета регистра)
-                if актуальность.lower() != "в чс":
-                    continue
-                
-                # Получаем дату снятия из колонки I
-                дата_снятия_str = row.get("Дата снятия", "").strip()
-                
-                # Проверяем, что дата снятия содержит сегодняшнюю дату
-                if today_str not in дата_снятия_str:
-                    continue
-                
-                exiting_today.append({
-                    "ник": игровой_ник,
-                    "строка": i,
-                    "discord": row.get("Дискорд юз", "-").strip(),
-                    "дата_снятия": дата_снятия_str,
-                    "причина": row.get("Причина", "-").strip()[:50],
-                    "актуальность": актуальность
-                })
-            
-            if exiting_today:
-                exiting_today.sort(key=lambda x: x["ник"])
-                
-                embed = discord.Embed(
-                    title="📅 ДОЛЖНЫ ВЫЙТИ СЕГОДНЯ",
-                    description=f"**Дата:** {today_str}\n"
-                               f"**Количество:** {len(exiting_today)} игроков",
-                    color=0xff9900
-                )
-                
-                for player in exiting_today[:10]:
-                    player_info = (
-                        f"┌ **Ник:** {player['ник']}\n"
-                        f"├ **Discord:** {player['discord']}\n"
-                        f"├ **Дата снятия:** {player['дата_снятия']}\n"
-                        f"├ **Причина:** {player['причина']}\n"
-                        f"└ **Строка:** #{player['строка']}"
-                    )
-                    
-                    embed.add_field(
-                        name=f"⏳ {player['ник']}",
-                        value=player_info,
-                        inline=False
-                    )
-                
-                if len(exiting_today) > 10:
-                    embed.set_footer(text=f"Показаны первые 10 из {len(exiting_today)}")
-                
-                mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFY_USERS])
-                await message.channel.send(content=mentions, embed=embed)
-            else:
-                embed = discord.Embed(
-                    title="📅 НЕТ ЗАПЛАНИРОВАННЫХ ВЫХОДОВ",
-                    description=f"На **{today_str}** нет игроков, которые должны выйти из черного списка.",
-                    color=0x808080
-                )
-                await message.channel.send(embed=embed)
-            
-        except Exception as e:
-            await message.channel.send(f"❌ Ошибка: {str(e)}")
-        
-        return
-    
-    # Команда !check_blacklist
-    if message.content.startswith("!check_blacklist"):
-        await message.channel.send("🔍 Проверяю изменения...")
-        await check_all_changes()
-        await message.channel.send("✅ Проверка завершена!")
-        return
-    
-    # Команда !changes
-    if message.content.startswith("!changes"):
-        try:
-            current = await get_current_blacklist_with_details()
-            previous = load_previous_state()
-            
-            if not previous:
-                await message.channel.send("📭 Нет данных о предыдущих состояниях. Используйте !check_blacklist для первой проверки.")
-                return
-            
-            prev_in_blacklist = [p for p in previous if p["is_in_blacklist"]]
-            curr_in_blacklist = [p for p in current if p["is_in_blacklist"]]
-            
-            embed = discord.Embed(
-                title="📊 Статистика черного списка",
-                color=0x3498db
+                changes_text += f"└ {change['поле']}: {change['было'][:30]} → {change['стало'][:30]}\n"
+            embed.add_field(
+                name=f"✏️ {player['ник']} (стр.{player['строка']})",
+                value=f"```{changes_text[:500]}```" if changes_text else "Изменения не указаны",
+                inline=False
             )
-            
-            embed.add_field(name="Было в ЧС", value=str(len(prev_in_blacklist)), inline=True)
-            embed.add_field(name="Стало в ЧС", value=str(len(curr_in_blacklist)), inline=True)
-            embed.add_field(name="Вышло из ЧС", value=str(len(prev_in_blacklist) - len(curr_in_blacklist)), inline=True)
-            embed.add_field(name="Всего записей", value=str(len(current)), inline=True)
-            
-            await message.channel.send(embed=embed)
-            
-        except Exception as e:
-            await message.channel.send(f"❌ Ошибка: {str(e)}")
-        
-        return
-    
-    # =============== КОМАНДА !a ===============
-    if message.content.startswith("!a"):
-        await message.channel.send("🔍 Проверяю просроченные записи в черном списке...")
-        
-        try:
-            response = requests.get(CSV_URL, timeout=10)
-            response.encoding = 'utf-8'
-            response.raise_for_status()
-            
-            csv_content = response.text
-            reader = csv.DictReader(io.StringIO(csv_content))
-            all_rows = list(reader)
-            
-            if not all_rows:
-                await message.channel.send("❌ Таблица пуста")
-                return
-            
-            today = date.today()
-            current_date = today.strftime("%d.%m.%Y")
-            
-            просроченные_в_чс = []  # Только те, кто должен выйти из ЧС
-            
-            for i, row in enumerate(all_rows, start=2):
-                игровой_ник = row.get("Игровой ник", "").strip()
-                if not игровой_ник:
-                    continue
-                
-                # Столбец I - Дата снятия
-                дата_снятия_str = row.get("Дата снятия", "").strip()
-                
-                # Столбец K - Актуальность
-                актуальность = row.get("Актуальность", "").strip()
-                актуальность_lower = актуальность.lower()
-                
-                # Пропускаем если:
-                # 1. Нет даты снятия
-                if not дата_снятия_str or дата_снятия_str == "-":
-                    continue
-                
-                # 2. В столбце K "навсегда"
-                if "навсегда" in актуальность_lower:
-                    continue
-                
-                # 3. В столбце K "вынесен из чс" или "амнистия"
-                if "вынесен из чс" in актуальность_lower or "амнистия" in актуальность_lower:
-                    continue
-                
-                # 4. Статус не содержит "в чс"
-                if "в чс" not in актуальность_lower:
-                    continue
-                
-                # Пытаемся распарсить дату
-                дата_снятия = None
-                try:
-                    # Пробуем разные форматы даты
-                    for fmt in ["%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d"]:
-                        try:
-                            # Берем только первую часть даты (без времени)
-                            date_part = дата_снятия_str.split()[0]
-                            дата_снятия = datetime.strptime(date_part, fmt).date()
-                            break
-                        except:
-                            continue
-                    
-                    if дата_снятия is None:
-                        continue
-                        
-                except Exception as e:
-                    print(f"Ошибка парсинга даты '{дата_снятия_str}': {e}")
-                    continue
-                
-                # Проверяем просрочена ли дата (дата в прошлом)
-                if дата_снятия < today:
-                    # Это просроченная запись, которая все еще в ЧС
-                    просроченные_в_чс.append({
-                        "ник": игровой_ник,
-                        "строка": i,
-                        "дата": дата_снятия_str,
-                        "статус": актуальность,
-                        "discord": row.get("Дискорд юз", "-").strip(),
-                        "причина": row.get("Причина", "-").strip()[:50]
-                    })
-            
-            # Формируем ответ
-            if просроченные_в_чс:
-                # Сортируем по дате (от самых старых)
-                просроченные_в_чс.sort(key=lambda x: x['дата'])
-                
-                response_text = "```\n"
-                response_text += "⚠️ ПРОСРОЧЕННЫЕ ЗАПИСИ (ДОЛЖНЫ БЫЛИ ВЫЙТИ ИЗ ЧС)\n"
-                response_text += f"📅 Сегодня: {current_date}\n"
-                response_text += f"🔴 Найдено: {len(просроченные_в_чс)}\n\n"
-                
-                for player in просроченные_в_чс:
-                    response_text += f"👤 {player['ник']} (стр.{player['строка']})\n"
-                    response_text += f"  📅 Должны были снять: {player['дата']}\n"
-                    response_text += f"  📌 Текущий статус: {player['статус']}\n"
-                    if player['discord'] and player['discord'] != "-":
-                        response_text += f"  💬 Discord: {player['discord']}\n"
-                    response_text += f"  📝 Причина: {player['причина']}\n\n"
-                
-                response_text += "```"
-                
-                # Проверяем длину сообщения
-                if len(response_text) <= 2000:
-                    await message.channel.send(response_text)
-                else:
-                    # Если слишком длинное, отправляем частями
-                    await message.channel.send(f"```\n⚠️ ПРОСРОЧЕННЫЕ ЗАПИСИ (В ЧС)\n📅 {current_date}\n🔴 Найдено: {len(просроченные_в_чс)}\n```")
-                    
-                    # Отправляем по частям
-                    chunk = "```\n"
-                    for player in просроченные_в_чс:
-                        player_text = f"👤 {player['ник']} (стр.{player['строка']})\n  📅 {player['дата']}\n  📌 {player['статус']}\n\n"
-                        if len(chunk + player_text) > 1900:
-                            chunk += "```"
-                            await message.channel.send(chunk)
-                            await asyncio.sleep(1)
-                            chunk = "```\n" + player_text
-                        else:
-                            chunk += player_text
-                    
-                    if chunk != "```\n":
-                        chunk += "```"
-                        await message.channel.send(chunk)
-                
-            else:
-                response_text = "```\n"
-                response_text += "✅ НЕТ ПРОСРОЧЕННЫХ ЗАПИСЕЙ\n"
-                response_text += f"📅 Сегодня: {current_date}\n\n"
-                response_text += "Все записи актуальны или уже обработаны\n"
-                response_text += "```"
-                await message.channel.send(response_text)
-            
-        except Exception as e:
-            await message.channel.send(f"❌ Ошибка: {str(e)}")
-            print(f"Ошибка в !a: {e}")
-        
-        return
-    
-    # =============== КОМАНДА !r ===============
-    if message.content.startswith("!r"):
-        await message.channel.send("🔍 Получаю Discord'ы просроченных записей...")
-        
-        try:
-            response = requests.get(CSV_URL, timeout=10)
-            response.encoding = 'utf-8'
-            response.raise_for_status()
-            
-            csv_content = response.text
-            reader = csv.DictReader(io.StringIO(csv_content))
-            all_rows = list(reader)
-            
-            if not all_rows:
-                await message.channel.send("❌ Таблица пуста")
-                return
-            
-            today = date.today()
-            просроченные_дискорды = []
-            
-            for i, row in enumerate(all_rows, start=2):
-                игровой_ник = row.get("Игровой ник", "")
-                if not игровой_ник:
-                    continue
-                
-                дата_снятия_str = row.get("Дата снятия", "").strip()
-                актуальность = row.get("Актуальность", "").strip()
-                актуальность_lower = актуальность.lower()
-                
-                if not дата_снятия_str or дата_снятия_str == "-":
-                    continue
-                
-                # Пропускаем если "навсегда"
-                if "навсегда" in актуальность_lower:
-                    continue
-                
-                # Пропускаем если уже обработано
-                if "вынесен из чс" in актуальность_lower or "амнистия" in актуальность_lower:
-                    continue
-                
-                try:
-                    for fmt in ["%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d"]:
-                        try:
-                            дата_снятия = datetime.strptime(дата_снятия_str.split()[0], fmt).date()
-                            break
-                        except:
-                            continue
-                    else:
-                        continue
-                except:
-                    continue
-                
-                # Если дата прошла и статус В ЧС
-                if дата_снятия < today:
-                    discord_value = row.get("Дискорд юз", "").strip()
-                    if discord_value and discord_value != "-":
-                        просроченные_дискорды.append(discord_value)
-            
-            # Формируем ответ
-            if просроченные_дискорды:
-                # Убираем дубликаты
-                уникальные_дискорды = list(set(просроченные_дискорды))
-                
-                # Сортируем
-                уникальные_дискорды.sort()
-                
-                # Создаем сообщение с Discord'ами в столбик
-                response_text = "```\n"
-                response_text += "📋 DISCORD'Ы ПРОСРОЧЕННЫХ ЗАПИСЕЙ\n"
-                response_text += f"📅 {today.strftime('%d.%m.%Y')}\n"
-                response_text += f"🔴 Найдено: {len(уникальные_дискорды)}\n\n"
-                
-                for discord_name in уникальные_дискорды:
-                    response_text += f"{discord_name}\n"
-                
-                response_text += "```"
-                
-                # Проверяем длину
-                if len(response_text) <= 2000:
-                    await message.channel.send(response_text)
-                else:
-                    # Если слишком длинное, разбиваем на несколько сообщений
-                    parts = []
-                    current_part = "```\n📋 DISCORD'Ы ПРОСРОЧЕННЫХ ЗАПИСЕЙ\n"
-                    current_part += f"📅 {today.strftime('%d.%m.%Y')}\n"
-                    current_part += f"🔴 Найдено: {len(уникальные_дискорды)}\n\n"
-                    
-                    for discord_name in уникальные_дискорды:
-                        if len(current_part) + len(discord_name) + 1 > 1990:
-                            current_part += "```"
-                            parts.append(current_part)
-                            current_part = "```\n" + discord_name + "\n"
-                        else:
-                            current_part += discord_name + "\n"
-                    
-                    if current_part != "```\n":
-                        current_part += "```"
-                        parts.append(current_part)
-                    
-                    for part in parts:
-                        await message.channel.send(part)
-                        await asyncio.sleep(1)
-                
-            else:
-                response_text = "```\n"
-                response_text += "✅ НЕТ АКТУАЛЬНЫХ ПРОСРОЧЕННЫХ ЗАПИСЕЙ\n"
-                response_text += f"📅 {today.strftime('%d.%m.%Y')}\n\n"
-                response_text += "Нет Discord'ов для отображения\n"
-                response_text += "```"
-                await message.channel.send(response_text)
-            
-        except Exception as e:
-            await message.channel.send(f"❌ Ошибка: {str(e)}")
-            print(f"Ошибка в !r: {e}")
-        
-        return
+        for player in added[:5]:
+            embed.add_field(
+                name=f"✅ {player['ник']} (стр.{player['строка']})",
+                value=f"┌ **Discord:** {player['дискорд'][:50]}\n├ **Причина:** {player['причина'][:50]}\n└ **Выдал:** {player['кто_выдал'][:30]}",
+                inline=False
+            )
+        for player in removed[:5]:
+            embed.add_field(
+                name=f"❌ {player['ник']} (стр.{player['строка']})",
+                value="Запись была удалена из таблицы",
+                inline=False
+            )
+        await moderation_channel.send(embed=embed)
+    except Exception as e:
+        print(f"Ошибка отправки: {e}")
 
-    # Команда !inf
-    if message.content.startswith("!inf"):
-        text = message.content.replace("!inf", "").strip()
-        
-        if text == "columns" or text == "столбцы":
-            await show_all_columns(message)
-            return
-        
-        names = [name.strip() for name in text.split('\n') if name.strip()]
-        
-        if not names:
-            await message.channel.send("❌ Напиши ник или ники")
-            return
-        
-        try:
-            response = requests.get(CSV_URL, timeout=10)
-            response.encoding = 'utf-8'
-            response.raise_for_status()
-            
-            csv_content = response.text
-            reader = csv.DictReader(io.StringIO(csv_content))
-            all_rows = list(reader)
-            
-            if not all_rows:
-                await message.channel.send("❌ Таблица пуста")
-                return
-            
-            results = []
-            
-            for search_name in names:
-                found = False
-                name_lower = search_name.lower()
-                
-                for i, row in enumerate(all_rows, start=2):
-                    игровой_ник = row.get("Игровой ник", "")
-                    
-                    if игровой_ник and игровой_ник.lower() == name_lower:
-                        row_data = []
-                        row_data.append("```")
-                        row_data.append(f"📋 Информация об игроке: {игровой_ник}")
-                        row_data.append(f"📍 Строка в таблице: {i}")
-                        row_data.append("========================================")
-                        row_data.append(f"Discord: {row.get('Дискорд юз', '-')}")
-                        row_data.append(f"Организация: {row.get('Организация', '-')}")
-                        row_data.append(f"Причина: {row.get('Причина', '-')}")
-                        row_data.append(f"Дата снятия: {row.get('Дата снятия', '-')}")
-                        row_data.append(f"Выдал: {row.get('Кто выдал', '-')}")
-                        row_data.append(f"Актуальность: {row.get('Актуальность', '-')}")
-                        row_data.append("========================================")
-                        row_data.append("```")
-                        
-                        results.append("\n".join(row_data))
-                        found = True
-                
-                if not found:
-                    results.append(f"\n❌ Игрок '{search_name}' не найден\n")
-            
-            for result in results:
-                await message.channel.send(result)
-            
-        except Exception as e:
-            await message.channel.send(f"❌ Ошибка: {str(e)}")
-        
-        return
+class BlacklistView(View):
+    def __init__(self, player_data):
+        super().__init__()
+        self.player_data = player_data
     
-    # Команда !columns
-    if message.content.startswith("!columns"):
-        await show_all_columns(message)
-        return
+    @discord.ui.button(label="Подробнее", style=discord.ButtonStyle.primary, emoji="📋")
+    async def details_button(self, interaction: discord.Interaction, button: Button):
+        embed = discord.Embed(
+            title=f"📊 ДЕТАЛЬНАЯ ИНФОРМАЦИЯ",
+            description=f"**{self.player_data['ник']}**",
+            color=0x3498db
+        )
+        for key, value in self.player_data.items():
+            if key != "ник":
+                embed.add_field(name=key, value=f"```{str(value)[:100]}```", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    @discord.ui.button(label="История", style=discord.ButtonStyle.secondary, emoji="📜")
+    async def history_button(self, interaction: discord.Interaction, button: Button):
+        history = load_player_history()
+        player_history = history.get(self.player_data['ник'], [])
+        if not player_history:
+            await interaction.response.send_message(f"Нет истории для {self.player_data['ник']}", ephemeral=True)
+            return
+        embed = discord.Embed(
+            title=f"📜 ИСТОРИЯ ИГРОКА",
+            description=f"**{self.player_data['ник']}**",
+            color=0x9b59b6
+        )
+        for event in player_history[-5:]:
+            embed.add_field(
+                name=f"🕐 {event['timestamp']}",
+                value=f"┌ **Действие:** {event['action']}\n└ **Детали:** {event['details'][:100]}",
+                inline=False
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
-async def show_all_columns(message):
-    """Показывает все доступные столбцы в таблице"""
+async def send_daily_report(channel):
+    stats = load_stats()
+    today = date.today().strftime("%d.%m.%Y")
+    day_stats = stats["daily"].get(today, {"added": 0, "removed": 0, "exited": 0})
+    embed = discord.Embed(
+        title="📊 ЕЖЕДНЕВНЫЙ ОТЧЕТ",
+        description=f"Отчет за {today}",
+        color=0x3498db,
+        timestamp=datetime.now()
+    )
+    embed.add_field(name="✅ Добавлено в ЧС", value=f"```{day_stats['added']}```", inline=True)
+    embed.add_field(name="❌ Удалено из ЧС", value=f"```{day_stats['removed']}```", inline=True)
+    embed.add_field(name="👤 Вышло из ЧС", value=f"```{day_stats['exited']}```", inline=True)
+    await channel.send(embed=embed)
+
+@tree.command(name="next", description="Показать игроков, которые должны выйти из ЧС сегодня")
+async def slash_next(interaction: discord.Interaction):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    await log_action(interaction.user, "/next", "Просмотр игроков на сегодня")
+    
     try:
         response = requests.get(CSV_URL, timeout=10)
         response.encoding = 'utf-8'
+        response.raise_for_status()
         csv_content = response.text
         reader = csv.DictReader(io.StringIO(csv_content))
         all_rows = list(reader)
         
-        if all_rows:
-            columns = list(all_rows[0].keys())
-            text = "📊 Доступные столбцы:\n\n"
-            for i, col in enumerate(columns):
-                letter = COLUMN_LETTERS[i] if i < len(COLUMN_LETTERS) else f"Column{i+1}"
-                text += f"**{letter}** - {col}\n"
-            await message.channel.send(text)
+        if not all_rows:
+            embed = discord.Embed(title="❌ Ошибка", description="Таблица пуста", color=0xff0000)
+            await interaction.followup.send(embed=embed)
+            return
+        
+        today = date.today()
+        today_str = today.strftime("%d.%m.%Y")
+        exiting_today = []
+        
+        for i, row in enumerate(all_rows, start=2):
+            игровой_ник = row.get("Игровой ник", "").strip()
+            if not игровой_ник:
+                continue
+            актуальность = row.get("Актуальность", "").strip()
+            if актуальность.lower() != "в чс":
+                continue
+            дата_снятия_str = row.get("Дата снятия", "").strip()
+            if today_str not in дата_снятия_str:
+                continue
+            exiting_today.append({
+                "ник": игровой_ник,
+                "строка": i,
+                "discord": row.get("Дискорд юз", "-").strip(),
+                "причина": row.get("Причина", "-").strip()[:50]
+            })
+        
+        embed = discord.Embed(title="📅 ДОЛЖНЫ ВЫЙТИ СЕГОДНЯ", color=0x00ff00, timestamp=datetime.now())
+        embed.add_field(name="📆 Дата", value=f"```{today_str}```", inline=True)
+        
+        if exiting_today:
+            exiting_today.sort(key=lambda x: x["ник"])
+            embed.add_field(name="👥 Количество", value=f"```{len(exiting_today)} игроков```", inline=True)
+            for player in exiting_today[:10]:
+                embed.add_field(
+                    name=f"⏳ {player['ник']}",
+                    value=f"┌ **Строка:** #{player['строка']}\n├ **Discord:** {player['discord'][:50]}\n└ **Причина:** {player['причина']}",
+                    inline=False
+                )
+            if len(exiting_today) > 10:
+                embed.set_footer(text=f"Показаны первые 10 из {len(exiting_today)}")
+            mentions = " ".join([f"<@{user_id}>" for user_id in NOTIFY_USERS])
+            await interaction.followup.send(content=mentions, embed=embed)
         else:
-            await message.channel.send("❌ Таблица пуста")
+            embed.add_field(name="ℹ️ Информация", value="Нет игроков, которые должны выйти из ЧС сегодня", inline=False)
+            await interaction.followup.send(embed=embed)
     except Exception as e:
-        await message.channel.send(f"❌ Ошибка: {str(e)}")
+        embed = discord.Embed(title="❌ Ошибка", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="overdue", description="Показать просроченные записи в черном списке")
+async def slash_overdue(interaction: discord.Interaction):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    
+    try:
+        response = requests.get(CSV_URL, timeout=10)
+        response.encoding = 'utf-8'
+        response.raise_for_status()
+        csv_content = response.text
+        reader = csv.DictReader(io.StringIO(csv_content))
+        all_rows = list(reader)
+        
+        if not all_rows:
+            embed = discord.Embed(title="❌ Ошибка", description="Таблица пуста", color=0xff0000)
+            await interaction.followup.send(embed=embed)
+            return
+        
+        today = date.today()
+        просроченные_в_чс = []
+        
+        for i, row in enumerate(all_rows, start=2):
+            игровой_ник = row.get("Игровой ник", "").strip()
+            if not игровой_ник:
+                continue
+            дата_снятия_str = row.get("Дата снятия", "").strip()
+            актуальность = row.get("Актуальность", "").strip().lower()
+            
+            if not дата_снятия_str or дата_снятия_str == "-":
+                continue
+            if "навсегда" in актуальность:
+                continue
+            if "вынесен из чс" in актуальность or "амнистия" in актуальность:
+                continue
+            if "в чс" not in актуальность:
+                continue
+            
+            try:
+                for fmt in ["%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d"]:
+                    try:
+                        date_part = дата_снятия_str.split()[0]
+                        дата_снятия = datetime.strptime(date_part, fmt).date()
+                        break
+                    except:
+                        continue
+                else:
+                    continue
+                if дата_снятия < today:
+                    просроченные_в_чс.append({
+                        "ник": игровой_ник,
+                        "строка": i,
+                        "дата": дата_снятия_str,
+                        "статус": row.get("Актуальность", "-"),
+                        "discord": row.get("Дискорд юз", "-").strip()[:50]
+                    })
+            except:
+                continue
+        
+        embed = discord.Embed(title="⏰ ПРОСРОЧЕННЫЕ ЗАПИСИ", color=0xff9900, timestamp=datetime.now())
+        embed.add_field(name="🔴 Найдено", value=f"```{len(просроченные_в_чс)} записей```", inline=True)
+        
+        if просроченные_в_чс:
+            for player in просроченные_в_чс[:10]:
+                embed.add_field(
+                    name=f"⚠️ {player['ник']} (стр.{player['строка']})",
+                    value=f"┌ **Дата снятия:** {player['дата']}\n├ **Статус:** {player['статус']}\n└ **Discord:** {player['discord']}",
+                    inline=False
+                )
+        else:
+            embed.add_field(name="✅ Отлично!", value="Нет просроченных записей", inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(title="❌ Ошибка", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="ds_overdue", description="Показать Discord'ы просроченных записей")
+async def slash_ds_overdue(interaction: discord.Interaction):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    
+    try:
+        response = requests.get(CSV_URL, timeout=10)
+        response.encoding = 'utf-8'
+        response.raise_for_status()
+        csv_content = response.text
+        reader = csv.DictReader(io.StringIO(csv_content))
+        all_rows = list(reader)
+        
+        today = date.today()
+        просроченные_дискорды = []
+        
+        for i, row in enumerate(all_rows, start=2):
+            игровой_ник = row.get("Игровой ник", "")
+            if not игровой_ник:
+                continue
+            дата_снятия_str = row.get("Дата снятия", "").strip()
+            актуальность = row.get("Актуальность", "").strip().lower()
+            
+            if not дата_снятия_str or дата_снятия_str == "-":
+                continue
+            if "навсегда" in актуальность:
+                continue
+            if "вынесен из чс" in актуальность or "амнистия" in актуальность:
+                continue
+            
+            try:
+                for fmt in ["%d.%m.%Y", "%d.%m.%y", "%Y-%m-%d"]:
+                    try:
+                        дата_снятия = datetime.strptime(дата_снятия_str.split()[0], fmt).date()
+                        break
+                    except:
+                        continue
+                else:
+                    continue
+                if дата_снятия < today:
+                    discord_value = row.get("Дискорд юз", "").strip()
+                    if discord_value and discord_value != "-":
+                        просроченные_дискорды.append(discord_value)
+            except:
+                continue
+        
+        embed = discord.Embed(title="📋 DISCORD'Ы ПРОСРОЧЕННЫХ ЗАПИСЕЙ", color=0x9b59b6, timestamp=datetime.now())
+        
+        if просроченные_дискорды:
+            уникальные = list(set(просроченные_дискорды))
+            уникальные.sort()
+            embed.add_field(name="🔴 Найдено", value=f"```{len(уникальные)} Discord```", inline=True)
+            discord_list = "\n".join([f"├ {d}" for d in уникальные[:25]])
+            embed.add_field(name="📝 Список", value=f"```\n{discord_list}\n```", inline=False)
+        else:
+            embed.add_field(name="✅ Отлично!", value="Нет Discord'ов для отображения", inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(title="❌ Ошибка", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="info", description="Получить информацию об игроке (можно несколько через запятую, пробел или новой строкой)")
+async def slash_info(interaction: discord.Interaction, ники: str):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    
+    try:
+        if '\n' in ники:
+            names_list = [n.strip() for n in ники.split('\n') if n.strip()]
+        elif ',' in ники:
+            names_list = [n.strip() for n in ники.split(',') if n.strip()]
+        else:
+            names_list = [n.strip() for n in ники.split() if n.strip()]
+        
+        if len(names_list) > 50:
+            await interaction.followup.send("❌ Можно проверить не более 50 ников за раз")
+            return
+        
+        response = requests.get(CSV_URL, timeout=10)
+        response.encoding = 'utf-8'
+        response.raise_for_status()
+        csv_content = response.text
+        reader = csv.DictReader(io.StringIO(csv_content))
+        all_rows = list(reader)
+        
+        if not all_rows:
+            embed = discord.Embed(title="❌ Ошибка", description="Таблица пуста", color=0xff0000)
+            await interaction.followup.send(embed=embed)
+            return
+        
+        found_players = []
+        not_found = []
+        
+        for search_name in names_list:
+            found = False
+            search_lower = search_name.lower()
+            
+            for i, row in enumerate(all_rows, start=2):
+                игровой_ник = row.get("Игровой ник", "")
+                if игровой_ник and игровой_ник.lower() == search_lower:
+                    актуальность = row.get("Актуальность", "-")
+                    
+                    player_data = {
+                        "ник": игровой_ник,
+                        "строка": i,
+                        "discord": row.get("Дискорд юз", "-"),
+                        "организация": row.get("Организация", "-"),
+                        "причина": row.get("Причина", "-")[:80],
+                        "дата_снятия": row.get("Дата снятия", "-"),
+                        "кто_выдал": row.get("Кто выдал", "-"),
+                        "актуальность": актуальность
+                    }
+                    found_players.append(player_data)
+                    found = True
+                    break
+            
+            if not found:
+                not_found.append(search_name)
+        
+        if len(names_list) == 1 and found_players:
+            player = found_players[0]
+            актуальность = player["актуальность"]
+            color = 0x00ff00 if "вынесен" in актуальность.lower() else (0xff0000 if "чс" in актуальность.lower() else 0x3498db)
+            
+            embed = discord.Embed(
+                title=f"📊 ИНФОРМАЦИЯ ОБ ИГРОКЕ",
+                description=f"**{player['ник']}**",
+                color=color,
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="📍 Строка", value=f"```#{player['строка']}```", inline=True)
+            embed.add_field(name="💬 Discord", value=f"```{player['discord'][:50]}```", inline=True)
+            embed.add_field(name="🏢 Организация", value=f"```{player['организация'][:50]}```", inline=True)
+            embed.add_field(name="📝 Причина", value=f"```{player['причина']}```", inline=False)
+            embed.add_field(name="📅 Дата снятия", value=f"```{player['дата_снятия']}```", inline=True)
+            embed.add_field(name="👮 Кто выдал", value=f"```{player['кто_выдал'][:50]}```", inline=True)
+            embed.add_field(name="📌 Актуальность", value=f"```{player['актуальность']}```", inline=True)
+            
+            view = BlacklistView(player)
+            await interaction.followup.send(embed=embed, view=view)
+            
+        elif len(found_players) > 0:
+            embed = discord.Embed(
+                title=f"📊 РЕЗУЛЬТАТЫ ПРОВЕРКИ",
+                description=f"Найдено {len(found_players)} из {len(names_list)} игроков",
+                color=0x00ff00,
+                timestamp=datetime.now()
+            )
+            
+            for player in found_players[:15]:
+                status_emoji = "🔴" if "в чс" in player["актуальность"].lower() else ("🟢" if "вынесен" in player["актуальность"].lower() else "⚪")
+                embed.add_field(
+                    name=f"{status_emoji} {player['ник']}",
+                    value=f"┌ **Строка:** #{player['строка']}\n├ **Discord:** {player['discord'][:40]}\n├ **Статус:** {player['актуальность']}\n└ **Причина:** {player['причина'][:60]}",
+                    inline=False
+                )
+            
+            if not_found:
+                embed.add_field(
+                    name="❌ Не найдены",
+                    value="\n".join([f"├ {n}" for n in not_found[:10]]),
+                    inline=False
+                )
+            
+            if len(found_players) > 15:
+                embed.set_footer(text=f"Показаны первые 15 из {len(found_players)}")
+            
+            await interaction.followup.send(embed=embed)
+            
+        elif not_found:
+            matches = []
+            search_lower = not_found[0].lower()
+            for i, row in enumerate(all_rows, start=2):
+                игровой_ник = row.get("Игровой ник", "")
+                if игровой_ник and search_lower in игровой_ник.lower():
+                    matches.append(игровой_ник)
+            
+            if matches:
+                embed = discord.Embed(
+                    title="🔍 НАЙДЕНЫ ПОХОЖИЕ ИГРОКИ",
+                    description=f"По запросу **{not_found[0]}** найдено {len(matches)} совпадений",
+                    color=0xff9900
+                )
+                embed.add_field(name="📝 Список", value="\n".join([f"├ {m}" for m in matches[:20]]), inline=False)
+                await interaction.followup.send(embed=embed)
+            else:
+                embed = discord.Embed(
+                    title="❌ ИГРОКИ НЕ НАЙДЕНЫ",
+                    description=f"Не найдены: {', '.join(not_found[:5])}",
+                    color=0xff0000
+                )
+                await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        embed = discord.Embed(title="❌ Ошибка", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="help", description="Показать список всех команд")
+async def slash_help(interaction: discord.Interaction):
+    embed = discord.Embed(title="🤖 ПОМОЩЬ ПО КОМАНДАМ БОТА", description="Все доступные команды", color=0x00ff00, timestamp=datetime.now())
+    embed.add_field(name="📅 /next", value="Показать игроков, которые должны выйти из ЧС сегодня", inline=False)
+    embed.add_field(name="⏰ /overdue", value="Показать просроченные записи", inline=False)
+    embed.add_field(name="📋 /ds_overdue", value="Показать Discord'ы просроченных записей", inline=False)
+    embed.add_field(name="ℹ️ /info [ники]", value="Получить информацию об игроке (можно несколько через запятую, пробел или новой строкой)", inline=False)
+    embed.add_field(name="📝 /log", value="Настроить канал для логов модерации", inline=False)
+    embed.add_field(name="🚫 /unlog", value="Отключить логи модерации", inline=False)
+    embed.add_field(name="🔔 /notification", value="Настроить канал для уведомлений", inline=False)
+    embed.add_field(name="🔕 /unnotification", value="Отключить уведомления", inline=False)
+    embed.add_field(name="📝 /logs", value="Настроить канал для логов действий", inline=False)
+    embed.add_field(name="📊 /stats", value="Показать статистику", inline=False)
+    embed.add_field(name="📜 /history [ник]", value="История изменений игрока", inline=False)
+    embed.add_field(name="🔍 /search [часть]", value="Поиск по части ника", inline=False)
+    embed.add_field(name="📎 /export", value="Экспорт данных в CSV", inline=False)
+    embed.add_field(name="⏲️ /schedule_report [ЧЧ:ММ]", value="Настроить ежедневный отчет", inline=False)
+    embed.add_field(name="🔧 /setrole [роль]", value="Установить роль для уведомлений", inline=False)
+    embed.add_field(name="❓ /help", value="Показать это сообщение", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="log", description="Настроить текущий канал для получения логов модерации")
+async def slash_log(interaction: discord.Interaction):
+    global moderation_channel
+    moderation_channel = interaction.channel
+    save_channels_config()
+    embed = discord.Embed(title="✅ КАНАЛ НАСТРОЕН", description=f"Канал #{interaction.channel.name} будет получать логи модерации", color=0x00ff00)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="unlog", description="Отключить отправку логов модерации")
+async def slash_unlog(interaction: discord.Interaction):
+    global moderation_channel
+    if moderation_channel and moderation_channel.id == interaction.channel.id:
+        moderation_channel = None
+        save_channels_config()
+        embed = discord.Embed(title="❌ КАНАЛ ОТКЛЮЧЕН", description="Логи модерации больше не будут отправляться", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
+    else:
+        embed = discord.Embed(title="⚠️ ОШИБКА", description="Этот канал не настроен для логов", color=0xffaa00)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@tree.command(name="notification", description="Настроить канал для уведомлений о выходе из ЧС")
+async def slash_notification(interaction: discord.Interaction):
+    global notification_channel
+    notification_channel = interaction.channel
+    save_channels_config()
+    embed = discord.Embed(title="✅ КАНАЛ НАСТРОЕН", description=f"Канал #{interaction.channel.name} будет получать уведомления", color=0x00ff00)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="unnotification", description="Отключить уведомления о выходе из ЧС")
+async def slash_unnotification(interaction: discord.Interaction):
+    global notification_channel
+    if notification_channel and notification_channel.id == interaction.channel.id:
+        notification_channel = None
+        save_channels_config()
+        embed = discord.Embed(title="❌ КАНАЛ ОТКЛЮЧЕН", description="Уведомления больше не будут отправляться", color=0xff0000)
+        await interaction.response.send_message(embed=embed)
+    else:
+        embed = discord.Embed(title="⚠️ ОШИБКА", description="Этот канал не настроен для уведомлений", color=0xffaa00)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@tree.command(name="logs", description="Настроить канал для логов действий бота")
+async def slash_logs(interaction: discord.Interaction):
+    global logs_channel
+    logs_channel = interaction.channel
+    save_channels_config()
+    embed = discord.Embed(title="✅ КАНАЛ ДЛЯ ЛОГОВ НАСТРОЕН", description=f"Логи действий будут отправляться в #{interaction.channel.name}", color=0x00ff00)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="stats", description="Показать статистику ЧС")
+async def slash_stats(interaction: discord.Interaction):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    stats = load_stats()
+    embed = discord.Embed(title="📊 СТАТИСТИКА ЧС", color=0x3498db, timestamp=datetime.now())
+    embed.add_field(name="✅ Всего добавлено", value=f"```{stats['total_added']}```", inline=True)
+    embed.add_field(name="❌ Всего удалено", value=f"```{stats['total_removed']}```", inline=True)
+    embed.add_field(name="👤 Всего вышло", value=f"```{stats['total_exited']}```", inline=True)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="history", description="История изменений игрока")
+async def slash_history(interaction: discord.Interaction, ник: str):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    history = load_player_history()
+    player_history = history.get(ник, [])
+    if not player_history:
+        embed = discord.Embed(title="📜 ИСТОРИЯ ИГРОКА", description=f"Нет истории для **{ник}**", color=0xff9900)
+        await interaction.response.send_message(embed=embed)
+        return
+    embed = discord.Embed(title=f"📜 ИСТОРИЯ ИГРОКА", description=f"**{ник}** - {len(player_history)} событий", color=0x9b59b6, timestamp=datetime.now())
+    for event in player_history[-10:]:
+        embed.add_field(name=f"🕐 {event['timestamp']}", value=f"┌ **Действие:** {event['action']}\n└ **Детали:** {event['details'][:100]}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="search", description="Поиск игроков по части ника")
+async def slash_search(interaction: discord.Interaction, часть: str):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    try:
+        response = requests.get(CSV_URL, timeout=10)
+        response.encoding = 'utf-8'
+        response.raise_for_status()
+        csv_content = response.text
+        reader = csv.DictReader(io.StringIO(csv_content))
+        all_rows = list(reader)
+        matches = []
+        search_lower = часть.lower()
+        for i, row in enumerate(all_rows, start=2):
+            игровой_ник = row.get("Игровой ник", "")
+            if игровой_ник and search_lower in игровой_ник.lower():
+                matches.append({"ник": игровой_ник, "строка": i, "статус": row.get("Актуальность", "-")})
+        embed = discord.Embed(title="🔍 РЕЗУЛЬТАТЫ ПОИСКА", description=f"По запросу **{часть}** найдено {len(matches)} игроков", color=0x3498db, timestamp=datetime.now())
+        for match in matches[:15]:
+            embed.add_field(name=f"👤 {match['ник']}", value=f"┌ **Строка:** #{match['строка']}\n└ **Статус:** {match['статус']}", inline=False)
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        embed = discord.Embed(title="❌ Ошибка", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="export", description="Экспортировать текущий ЧС в файл")
+async def slash_export(interaction: discord.Interaction):
+    if is_blacklisted(interaction.user.id):
+        await interaction.response.send_message("❌ Вы в черном списке бота", ephemeral=True)
+        return
+    await interaction.response.defer(thinking=True)
+    try:
+        current_players = await get_current_blacklist_with_details()
+        output = io.StringIO()
+        writer = csv.writer(output)
+        writer.writerow(["Ник", "Discord", "Причина", "Дата снятия", "Кто выдал", "Актуальность", "Организация", "Строка"])
+        for player in current_players:
+            writer.writerow([player["ник"], player["дискорд"], player["причина"], player["дата_снятия"], player["кто_выдал"], player["актуальность"], player["организация"], player["строка"]])
+        output.seek(0)
+        file = discord.File(io.BytesIO(output.getvalue().encode('utf-8')), filename=f"blacklist_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv")
+        await interaction.followup.send(content="📊 Экспорт данных ЧС:", file=file)
+    except Exception as e:
+        embed = discord.Embed(title="❌ Ошибка", description=str(e), color=0xff0000)
+        await interaction.followup.send(embed=embed)
+
+@tree.command(name="schedule_report", description="Настроить ежедневный отчет")
+async def schedule_report(interaction: discord.Interaction, время: str):
+    if interaction.user.id not in NOTIFY_USERS:
+        await interaction.response.send_message("❌ У вас нет прав", ephemeral=True)
+        return
+    if not re.match(r'^\d{2}:\d{2}$', время):
+        await interaction.response.send_message("❌ Неверный формат. Используйте ЧЧ:ММ", ephemeral=True)
+        return
+    schedules = load_schedules()
+    schedules.append({"time": время, "channel_id": interaction.channel.id, "user_id": interaction.user.id})
+    save_schedules(schedules)
+    embed = discord.Embed(title="✅ РАСПИСАНИЕ НАСТРОЕНО", description=f"Отчет будет отправляться в {время}", color=0x00ff00)
+    await interaction.response.send_message(embed=embed)
+
+@tree.command(name="setrole", description="Установить роль для уведомлений")
+async def set_role(interaction: discord.Interaction, роль: discord.Role):
+    if interaction.user.id not in NOTIFY_USERS:
+        await interaction.response.send_message("❌ У вас нет прав", ephemeral=True)
+        return
+    global NOTIFY_ROLE_ID
+    NOTIFY_ROLE_ID = роль.id
+    embed = discord.Embed(title="✅ РОЛЬ УСТАНОВЛЕНА", description=f"Роль {роль.mention} будет получать уведомления", color=0x00ff00)
+    await interaction.response.send_message(embed=embed)
 
 if __name__ == "__main__":
-    print("🚗 Запуск бота...")
+    print("🚀 Запуск бота...")
     bot.run(TOKEN)
